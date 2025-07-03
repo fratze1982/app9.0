@@ -4,7 +4,6 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.multioutput import MultiOutputRegressor
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 st.set_page_config(page_title="KI-Vorhersage für Lackrezepturen", layout="wide")
 st.title("🎨 KI-Vorhersage für Lackrezepturen")
@@ -15,7 +14,7 @@ if uploaded_file is None:
     st.warning("Bitte lade eine CSV-Datei hoch.")
     st.stop()
 
-# --- CSV einlesen ---
+# --- CSV einlesen mit Fehlerbehandlung ---
 try:
     df = pd.read_csv(uploaded_file, sep=";", decimal=",", on_bad_lines='skip')
     st.success("✅ Datei erfolgreich geladen.")
@@ -25,183 +24,136 @@ except Exception as e:
 
 st.write("🧾 Gefundene Spalten:", df.columns.tolist())
 
-# --- Zielspaltenauswahl ---
-numerische_spalten = df.select_dtypes(include=[np.number]).columns.tolist()
-zielspalten = st.multiselect("🎯 Wähle die Zielgrößen (Kennwerte)", options=numerische_spalten, default=numerische_spalten[:1])
+# --- Viskositätskurve aus CSV plotten ---
 
-if not zielspalten:
-    st.error("❌ Bitte mindestens eine Zielgröße auswählen.")
+# Definiere Scherraten (in Float, mit Punkt als Dezimal)
+scherraten = [0.1, 0.209, 0.436, 1, 1.9, 3.28, 10, 17.3, 36.2, 53, 100, 329, 687, 1000, 3010]
+
+# Spaltennamen mit Komma (wie in CSV) als Strings
+scherraten_cols = [str(s).replace('.', ',') for s in scherraten]
+
+# Prüfe, welche Spalten im DataFrame vorhanden sind
+vorhandene_cols = [c for c in scherraten_cols if c in df.columns]
+
+if vorhandene_cols:
+    st.subheader("📉 Gemessene Viskositätskurven")
+    fig, ax = plt.subplots(figsize=(8, 4))
+    # Plot aller Kurven leicht transparent
+    for idx, row in df.iterrows():
+        ax.plot(scherraten, row[vorhandene_cols].values, alpha=0.3, color='blue')
+    ax.set_xscale('log')
+    ax.set_xlabel("Scherrate [1/s]")
+    ax.set_ylabel("Viskosität")
+    ax.set_title("Viskosität vs. Scherrate (gemessene Kurven)")
+    st.pyplot(fig)
+else:
+    st.info("Keine Spalten mit Viskositätsdaten für Scherraten gefunden.")
+
+# --- Flexible Auswahl der Rohstoff- und Zielspalten ---
+alle_spalten = df.columns.tolist()
+vorgeschlagene_rohstoffe = alle_spalten[:6]
+vorgeschlagene_zielgroessen = alle_spalten[6:]
+
+st.subheader("🔧 Spaltenauswahl")
+rohstoff_spalten = st.multiselect(
+    "🧪 Wähle die Rohstoffspalten (Einflussgrößen)", 
+    options=alle_spalten,
+    default=vorgeschlagene_rohstoffe
+)
+
+zielspalten_options = [s for s in alle_spalten if s not in rohstoff_spalten]
+default_zielspalten = [s for s in vorgeschlagene_zielgroessen if s in zielspalten_options]
+
+zielspalten = st.multiselect(
+    "🎯 Wähle die Zielgrößen (Kennwerte)", 
+    options=zielspalten_options,
+    default=default_zielspalten
+)
+
+if not rohstoff_spalten or not zielspalten:
+    st.error("Bitte sowohl Rohstoff- als auch Zielspalten auswählen.")
     st.stop()
 
-X = df.drop(columns=zielspalten)
+# --- Eingabe- und Zielvariablen trennen ---
+X = df[rohstoff_spalten].copy()
 y = df[zielspalten].copy()
 
-# --- Spaltentypen analysieren ---
-kategorisch = X.select_dtypes(include=["object", "category"]).columns.tolist()
-numerisch = X.select_dtypes(include=[np.number]).columns.tolist()
+# Spaltentypen bestimmen
+kategorisch = X.select_dtypes(include="object").columns.tolist()
+numerisch = X.select_dtypes(exclude="object").columns.tolist()
 
-# --- Eingabemaske mit robustem Slider ---
-st.sidebar.header("🔧 Parameter anpassen")
-user_input = {}
-for col in numerisch:
-    col_values = df[col].dropna()
-    if col_values.empty:
-        # Spalte überspringen, wenn keine Daten vorhanden sind
-        continue
-
-    min_val = float(col_values.min())
-    max_val = float(col_values.max())
-    mean_val = float(col_values.mean())
-
-    # Falls min == max, kleinen Bereich erzeugen, damit Slider funktioniert
-    if min_val == max_val:
-        min_val -= 0.01
-        max_val += 0.01
-
-    # Mittelwert sicher innerhalb des Bereichs setzen
-    if mean_val < min_val or mean_val > max_val:
-        mean_val = (min_val + max_val) / 2
-
-    # Optional Debug-Ausgabe
-    # st.sidebar.write(f"{col}: min={min_val}, max={max_val}, mean={mean_val}")
-
-    user_input[col] = st.sidebar.slider(col, min_val, max_val, mean_val)
-
-for col in kategorisch:
-    user_input[col] = st.sidebar.selectbox(col, df[col].dropna().unique())
-
-input_df = pd.DataFrame([user_input])
+# One-Hot-Encoding
 X_encoded = pd.get_dummies(X)
-input_encoded = pd.get_dummies(input_df)
 
-# Fehlende Spalten in input_encoded ergänzen, um gleiche Struktur zu garantieren
-for col in X_encoded.columns:
-    if col not in input_encoded.columns:
-        input_encoded[col] = 0
-input_encoded = input_encoded[X_encoded.columns]
-
-# --- Modelltraining ---
+# Fehlende Werte bereinigen
 df_encoded = X_encoded.copy()
 df_encoded[y.columns] = y
 df_encoded = df_encoded.dropna()
+
 X_clean = df_encoded[X_encoded.columns]
 y_clean = df_encoded[y.columns]
 
+if X_clean.empty or y_clean.empty:
+    st.error("❌ Keine gültigen Daten zum Trainieren.")
+    st.stop()
+
+# --- Modelltraining ---
 modell = MultiOutputRegressor(RandomForestRegressor(n_estimators=150, random_state=42))
 modell.fit(X_clean, y_clean)
 
+# --- Benutzer-Eingabeformular ---
+st.sidebar.header("🔧 Parameter anpassen")
+user_input = {}
+
+for col in numerisch:
+    try:
+        min_val = float(df[col].min())
+        max_val = float(df[col].max())
+        mean_val = float(df[col].mean())
+        if min_val == max_val:
+            user_input[col] = st.sidebar.number_input(col, value=mean_val)
+        else:
+            user_input[col] = st.sidebar.slider(col, min_val, max_val, mean_val)
+    except Exception as e:
+        st.sidebar.write(f"Fehler bei Spalte {col}: {e}")
+        continue
+
+for col in kategorisch:
+    options = sorted(df[col].dropna().unique())
+    user_input[col] = st.sidebar.selectbox(col, options)
+
+input_df = pd.DataFrame([user_input])
+input_encoded = pd.get_dummies(input_df)
+
+# Fehlende Spalten auffüllen
+for col in X_clean.columns:
+    if col not in input_encoded.columns:
+        input_encoded[col] = 0
+input_encoded = input_encoded[X_clean.columns]
+
 # --- Vorhersage ---
 prediction = modell.predict(input_encoded)[0]
+
 st.subheader("🔮 Vorhergesagte Zielgrößen")
 for i, ziel in enumerate(zielspalten):
     st.metric(label=ziel, value=round(prediction[i], 2))
 
-# --- Zieloptimierung (Zufallsansatz) ---
-st.subheader("🎯 Zieloptimierung per Zufallssuche")
-zielwerte = {}
-toleranzen = {}
-gewichtung = {}
+# --- Vorhersage der Viskositätskurve plotten (falls alle Scherraten-Spalten als Zielspalten ausgewählt sind) ---
+if all(col in zielspalten for col in vorhandene_cols):
+    st.subheader("📈 Vorhergesagte Viskositätskurve")
+    # Reihenfolge der Viskositätswerte nach Scherraten sortieren
+    # Achtung: prediction ist ein np.array mit der gleichen Reihenfolge wie zielspalten
+    # Wir extrahieren die Werte für die Scherraten-Spalten in der richtigen Reihenfolge
+    pred_dict = dict(zip(zielspalten, prediction))
+    pred_viskositaeten = [pred_dict[col] for col in vorhandene_cols]
 
-with st.expander("⚙️ Zielvorgaben & Toleranzen setzen"):
-    for ziel in zielspalten:
-        zielwerte[ziel] = st.number_input(f"Zielwert für {ziel}", value=float(df[ziel].mean()))
-        toleranzen[ziel] = st.number_input(f"Toleranz für {ziel} (±)", value=2.0)
-        gewichtung[ziel] = st.slider(f"Gewichtung für {ziel}", 0.0, 5.0, 1.0, 0.1)
-
-steuerbare_rohstoffe = numerisch
-fixierte_werte = {}
-rohstoffgrenzen = {}
-
-st.sidebar.header("🧪 Rohstoffe fixieren oder begrenzen")
-for roh in steuerbare_rohstoffe:
-    if st.sidebar.checkbox(f"{roh} fixieren?"):
-        fixierte_werte[roh] = st.sidebar.number_input(f"Fixwert für {roh}", value=float(df[roh].mean()))
-    else:
-        col_values = df[roh].dropna()
-        min_val = float(col_values.min())
-        max_val = float(col_values.max())
-        if min_val == max_val:
-            min_val -= 0.01
-            max_val += 0.01
-        rohstoffgrenzen[roh] = st.sidebar.slider(f"Grenzen für {roh}", min_val, max_val, (min_val, max_val))
-
-if st.button("🚀 Zielsuche starten"):
-    sim_daten = []
-    for _ in range(1000):
-        rohwerte = {}
-        for roh in steuerbare_rohstoffe:
-            if roh in fixierte_werte:
-                rohwerte[roh] = fixierte_werte[roh]
-            else:
-                rohwerte[roh] = np.random.uniform(*rohstoffgrenzen[roh])
-        sim_daten.append(rohwerte)
-
-    sim_df = pd.DataFrame(sim_daten)
-    sim_encoded = pd.get_dummies(sim_df)
-    for col in X_clean.columns:
-        if col not in sim_encoded.columns:
-            sim_encoded[col] = 0
-    sim_encoded = sim_encoded[X_clean.columns]
-    y_pred = modell.predict(sim_encoded)
-
-    treffer = []
-    for i, yhat in enumerate(y_pred):
-        score = 0
-        passt = True
-        for ziel in zielspalten:
-            delta = abs(yhat[zielspalten.index(ziel)] - zielwerte[ziel])
-            score += delta * gewichtung[ziel]
-            if delta > toleranzen[ziel]:
-                passt = False
-        if passt:
-            treffer.append((i, score))
-
-    if treffer:
-        treffer.sort(key=lambda x: x[1])
-        top_idx = [i for i, _ in treffer[:10]]
-        ergebnis_df = pd.concat(
-            [sim_df.iloc[top_idx].reset_index(drop=True),
-             pd.DataFrame(y_pred[top_idx], columns=zielspalten)],
-            axis=1
-        )
-        ergebnis_df.insert(0, "Score", [round(s, 2) for _, s in treffer[:10]])
-
-        st.success(f"✅ {len(ergebnis_df)} passende Formulierungen gefunden.")
-        st.dataframe(ergebnis_df)
-
-        csv = ergebnis_df.to_csv(index=False).encode("utf-8")
-        st.download_button("📥 Ergebnisse herunterladen", data=csv, file_name="optimierte_formulierungen.csv")
-
-        # --- Balkendiagramm ---
-        st.subheader("📊 Vergleich Zielgrößen (Top 5)")
-        vergleich_df = ergebnis_df.head(5).copy()
-        fig, ax = plt.subplots(figsize=(10, 5))
-        for ziel in zielspalten:
-            ax.plot(vergleich_df["Score"], vergleich_df[ziel], label=ziel, marker="o")
-        ax.set_xlabel("Score")
-        ax.set_ylabel("Zielwert")
-        ax.legend()
-        st.pyplot(fig)
-
-        # --- Radar-Diagramm ---
-        st.subheader("🔬 Radar-Diagramm der Top 3")
-        if len(ergebnis_df) >= 3:
-            radar_df = ergebnis_df.head(3)[zielspalten].copy()
-            labels = list(zielspalten)
-            num_vars = len(labels)
-            angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
-            angles += angles[:1]
-            labels += labels[:1]
-
-            fig, ax = plt.subplots(subplot_kw=dict(polar=True))
-            for idx, row in radar_df.iterrows():
-                values = row.tolist()
-                values += values[:1]
-                ax.plot(angles, values, label=f"Formulierung {idx+1}")
-                ax.fill(angles, values, alpha=0.1)
-            ax.set_thetagrids(np.degrees(angles), labels)
-            ax.set_title("Radarvergleich Zielgrößen")
-            ax.legend(loc="upper right")
-            st.pyplot(fig)
-    else:
-        st.error("❌ Keine passenden Formulierungen innerhalb der Toleranzen gefunden.")
+    fig2, ax2 = plt.subplots(figsize=(8, 4))
+    ax2.plot(scherraten, pred_viskositaeten, marker='o', color='red', label='Vorhersage')
+    ax2.set_xscale('log')
+    ax2.set_xlabel("Scherrate [1/s]")
+    ax2.set_ylabel("Viskosität")
+    ax2.set_title("Vorhergesagte Viskositätskurve")
+    ax2.legend()
+    st.pyplot(fig2)
+else:
+    st.info("Wähle alle Viskositäts-Spalten (Scherraten) als Zielgrößen aus, um Vorhersagekurve anzuzeigen.")
