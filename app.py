@@ -40,11 +40,33 @@ y = df[zielspalten].copy()
 kategorisch = X.select_dtypes(include=["object", "category"]).columns.tolist()
 numerisch = X.select_dtypes(include=[np.number]).columns.tolist()
 
-# --- Eingabemaske ---
+# --- Eingabemaske mit robustem Slider ---
 st.sidebar.header("🔧 Parameter anpassen")
 user_input = {}
 for col in numerisch:
-    user_input[col] = st.sidebar.slider(col, float(df[col].min()), float(df[col].max()), float(df[col].mean()))
+    col_values = df[col].dropna()
+    if col_values.empty:
+        # Spalte überspringen, wenn keine Daten vorhanden sind
+        continue
+
+    min_val = float(col_values.min())
+    max_val = float(col_values.max())
+    mean_val = float(col_values.mean())
+
+    # Falls min == max, kleinen Bereich erzeugen, damit Slider funktioniert
+    if min_val == max_val:
+        min_val -= 0.01
+        max_val += 0.01
+
+    # Mittelwert sicher innerhalb des Bereichs setzen
+    if mean_val < min_val or mean_val > max_val:
+        mean_val = (min_val + max_val) / 2
+
+    # Optional Debug-Ausgabe
+    # st.sidebar.write(f"{col}: min={min_val}, max={max_val}, mean={mean_val}")
+
+    user_input[col] = st.sidebar.slider(col, min_val, max_val, mean_val)
+
 for col in kategorisch:
     user_input[col] = st.sidebar.selectbox(col, df[col].dropna().unique())
 
@@ -52,6 +74,7 @@ input_df = pd.DataFrame([user_input])
 X_encoded = pd.get_dummies(X)
 input_encoded = pd.get_dummies(input_df)
 
+# Fehlende Spalten in input_encoded ergänzen, um gleiche Struktur zu garantieren
 for col in X_encoded.columns:
     if col not in input_encoded.columns:
         input_encoded[col] = 0
@@ -94,8 +117,9 @@ for roh in steuerbare_rohstoffe:
     if st.sidebar.checkbox(f"{roh} fixieren?"):
         fixierte_werte[roh] = st.sidebar.number_input(f"Fixwert für {roh}", value=float(df[roh].mean()))
     else:
-        min_val = float(df[roh].min())
-        max_val = float(df[roh].max())
+        col_values = df[roh].dropna()
+        min_val = float(col_values.min())
+        max_val = float(col_values.max())
         if min_val == max_val:
             min_val -= 0.01
             max_val += 0.01
@@ -103,7 +127,6 @@ for roh in steuerbare_rohstoffe:
 
 if st.button("🚀 Zielsuche starten"):
     sim_daten = []
-    scores = []
     for _ in range(1000):
         rohwerte = {}
         for roh in steuerbare_rohstoffe:
