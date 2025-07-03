@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 st.set_page_config(page_title="KI-Vorhersage für Lackrezepturen", layout="wide")
-st.title("🎨 KI-Vorhersage für Lackrezepturen mit Viskositätskurve")
+st.title("🎨 KI-Vorhersage für Lackrezepturen")
 
 # --- Datei-Upload ---
 uploaded_file = st.file_uploader("📁 CSV-Datei hochladen (mit ; getrennt)", type=["csv"])
@@ -25,106 +25,100 @@ except Exception as e:
 
 st.write("🧾 Gefundene Spalten:", df.columns.tolist())
 
-# --- Erkennung von Viskositäts-Spalten anhand typischer Scherraten ---
-visko_scherraten = ['0,1','0,209','0,436','1','1,9','3,28','10','17,3','36,2','53','100','329','687','1000','3010']
-visko_scherraten_norm = [s.replace(',', '.') for s in visko_scherraten]
-visko_spalten = [col for col in df.columns if col.replace(',', '.') in visko_scherraten_norm]
-
-# --- Zielgrößen manuell wählbar ---
+# --- Spaltenauswahl für Flexibilität ---
 alle_spalten = df.columns.tolist()
-st.markdown("---")
-st.header("🎯 Zielgrößen & Rohstoffe definieren")
+anzahl_rohstoffe = st.number_input("🔧 Anzahl der Rohstoffspalten (Rest = Zielgrößen)", min_value=1, max_value=len(alle_spalten)-1, value=6)
+rohstoff_spalten = alle_spalten[:anzahl_rohstoffe]
+ziel_spalten_kandidaten = alle_spalten[anzahl_rohstoffe:]
 
 zielspalten = st.multiselect(
     "🎯 Wähle die Zielgrößen (Kennwerte)",
-    options=[s for s in alle_spalten if s not in visko_spalten],
-    default=[]
+    options=ziel_spalten_kandidaten,
+    default=ziel_spalten_kandidaten[:1]
 )
 
 if not zielspalten:
-    st.warning("Bitte mindestens eine Zielgröße auswählen.")
+    st.error("❌ Bitte mindestens eine Zielgröße auswählen.")
     st.stop()
 
-X = df.drop(columns=zielspalten + visko_spalten, errors="ignore")
+X = df[rohstoff_spalten]
 y = df[zielspalten].copy()
 
-# Numerisch/kategorisch trennen
+# Spaltentypen bestimmen
 kategorisch = X.select_dtypes(include="object").columns.tolist()
-numerisch = X.select_dtypes(include=[np.number]).columns.tolist()
+numerisch = X.select_dtypes(exclude="object").columns.tolist()
 
-# Encoding + Clean
+# One-Hot-Encoding
 X_encoded = pd.get_dummies(X)
+
+# Fehlende Werte bereinigen
 df_encoded = X_encoded.copy()
 df_encoded[y.columns] = y
 df_encoded = df_encoded.dropna()
+
 X_clean = df_encoded[X_encoded.columns]
 y_clean = df_encoded[y.columns]
+
+if X_clean.empty or y_clean.empty:
+    st.error("❌ Keine gültigen Daten zum Trainieren.")
+    st.stop()
 
 # --- Modelltraining ---
 modell = MultiOutputRegressor(RandomForestRegressor(n_estimators=150, random_state=42))
 modell.fit(X_clean, y_clean)
 
-# --- Eingabeformular ---
-st.sidebar.header("🛠 Parameter anpassen")
+# --- Benutzer-Eingabeformular ---
+st.sidebar.header("🔧 Parameter anpassen")
 user_input = {}
+
 for col in numerisch:
-    user_input[col] = st.sidebar.slider(col, float(df[col].min()), float(df[col].max()), float(df[col].mean()))
+    try:
+        min_val = float(df[col].min())
+        max_val = float(df[col].max())
+        mean_val = float(df[col].mean())
+
+        if np.isnan(min_val) or np.isnan(max_val) or min_val == max_val:
+            continue
+
+        user_input[col] = st.sidebar.slider(
+            col, min_value=min_val, max_value=max_val, value=mean_val
+        )
+    except Exception as e:
+        st.sidebar.warning(f"{col} konnte nicht verarbeitet werden: {e}")
+        continue
+
 for col in kategorisch:
-    user_input[col] = st.sidebar.selectbox(col, sorted(df[col].dropna().unique()))
+    options = sorted(df[col].dropna().unique())
+    user_input[col] = st.sidebar.selectbox(col, options)
 
 input_df = pd.DataFrame([user_input])
 input_encoded = pd.get_dummies(input_df)
+
+# Fehlende Spalten auffüllen
 for col in X_clean.columns:
-    if col not in input_encoded:
+    if col not in input_encoded.columns:
         input_encoded[col] = 0
 input_encoded = input_encoded[X_clean.columns]
 
 # --- Vorhersage ---
 prediction = modell.predict(input_encoded)[0]
+
 st.subheader("🔮 Vorhergesagte Zielgrößen")
 for i, ziel in enumerate(zielspalten):
     st.metric(label=ziel, value=round(prediction[i], 2))
 
-# --- Viskositätskurve (Originaldaten) ---
-st.markdown("---")
-st.header("💧 Viskositätskurve aus Datei")
-if visko_spalten:
-    try:
-        visko_df = df[visko_spalten].copy()
-        visko_df.columns = [float(c.replace(',', '.')) for c in visko_spalten]
-        visko_df_plot = visko_df.T
-        visko_df_plot.columns = [f"Messung {i+1}" for i in range(len(visko_df_plot.columns))]
+# --- Viskositätskurve (optional) anzeigen ---
+scherraten = [0.1, 0.209, 0.436, 1, 1.9, 3.28, 10, 17.3, 36.2, 53, 100, 329, 687, 1000, 3010]
+visko_cols = [str(sr) for sr in scherraten if str(sr) in df.columns]
 
-        fig, ax = plt.subplots()
-        visko_df_plot.plot(ax=ax, legend=False)
-        ax.set_xlabel("Scherrate [1/s]")
-        ax.set_ylabel("Viskosität [mPa·s]")
-        ax.set_title("Gemessene Viskositätskurven")
-        ax.set_xscale("log")
-        st.pyplot(fig)
-    except Exception as e:
-        st.error(f"Fehler beim Zeichnen der Viskositätskurve: {e}")
-else:
-    st.info("ℹ️ Keine Viskositätskurvendaten gefunden.")
-
-# --- Vorhersage der Viskositätskurve ---
-if visko_spalten:
-    st.header("🧠 KI-Vorhersage der Viskositätskurve")
-    try:
-        visko_y = df[visko_spalten].copy()
-        visko_y.columns = [float(c.replace(',', '.')) for c in visko_spalten]
-
-        visko_model = MultiOutputRegressor(RandomForestRegressor(n_estimators=100, random_state=42))
-        visko_model.fit(X_clean, visko_y.loc[X_clean.index])
-
-        visko_pred = visko_model.predict(input_encoded)[0]
-
-        fig2, ax2 = plt.subplots()
-        ax2.plot(visko_y.columns, visko_pred, marker="o")
-        ax2.set_xlabel("Scherrate [1/s]")
-        ax2.set_ylabel("Viskosität [mPa·s]")
-        ax2.set_title("Vorhergesagte Viskositätskurve")
-        ax2.set_xscale("log")
-        st.pyplot(fig2)
-    except Exception as e:
-        st.error(f"Fehler bei der Viskositätsvorhersage: {e}")
+if visko_cols:
+    st.subheader("📈 Viskositätskurven (Messwerte)")
+    fig, ax = plt.subplots()
+    for idx in range(min(5, len(df))):
+        y_vals = df.loc[idx, visko_cols].values.astype(float)
+        ax.plot(scherraten[:len(y_vals)], y_vals, label=f"Messung {idx+1}")
+    ax.set_xlabel("Scherrate [1/s]")
+    ax.set_ylabel("Viskosität [mPa·s]")
+    ax.set_title("Viskosität über Scherrate")
+    ax.legend()
+    st.pyplot(fig)
